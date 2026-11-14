@@ -86,4 +86,9 @@ class Order extends Model
     {
         return $this->hasMany(StockHold::class);
     }
+
+    public function feedback()
+    {
+        return $this->hasOne(Feedback::class);
+    }
 }

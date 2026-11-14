@@ -4,6 +4,8 @@ use App\Http\Controllers\Api\AdminMenuController;
 use App\Http\Controllers\Api\AdminReportController;
 use App\Http\Controllers\Api\AdminStaffController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\CustomerProfileController;
+use App\Http\Controllers\Api\FeedbackController;
 use App\Http\Controllers\Api\MenuController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\StaffMenuController;
@@ -57,5 +59,17 @@ Route::prefix('v1')->group(function () {
 
         Route::get('/reports/sales', [AdminReportController::class, 'sales']);
         Route::get('/audit-logs', [AdminReportController::class, 'auditLogs']);
+    });
+
+    // Feedback & Reviews (Phase 6 - T035)
+    Route::post('/feedback', [FeedbackController::class, 'store']);
+    Route::get('/feedback/summary', [FeedbackController::class, 'summary']);
+
+    // Customer Profile & Favorites (Phase 6 - T036)
+    Route::prefix('customer')->middleware('auth:sanctum')->group(function () {
+        Route::get('/orders', [CustomerProfileController::class, 'orders']);
+        Route::get('/favorites', [CustomerProfileController::class, 'favorites']);
+        Route::post('/favorites/toggle', [CustomerProfileController::class, 'toggleFavorite']);
+        Route::post('/favorites', [CustomerProfileController::class, 'toggleFavorite']);
     });
 });

@@ -45,6 +45,16 @@ class MenuItem extends Model
         return $this->hasMany(StockHold::class);
     }
 
+    public function favorites()
+    {
+        return $this->hasMany(Favorite::class);
+    }
+
+    public function favoritedByUsers()
+    {
+        return $this->belongsToMany(User::class, 'favorites', 'menu_item_id', 'user_id');
+    }
+
     public function scopeAvailable($query)
     {
         return $query->where('is_sold_out', false)->where('current_stock', '>', 0);

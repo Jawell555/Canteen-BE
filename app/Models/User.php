@@ -87,4 +87,36 @@ class User extends Authenticatable
     {
         return $this->hasMany(AuditLog::class);
     }
+
+    /**
+     * Relationship with Orders.
+     */
+    public function orders()
+    {
+        return $this->hasMany(Order::class);
+    }
+
+    /**
+     * Relationship with Feedbacks.
+     */
+    public function feedbacks()
+    {
+        return $this->hasMany(Feedback::class);
+    }
+
+    /**
+     * Relationship with Favorites.
+     */
+    public function favorites()
+    {
+        return $this->hasMany(Favorite::class);
+    }
+
+    /**
+     * Belongs to many favorite MenuItems.
+     */
+    public function favoriteMenuItems()
+    {
+        return $this->belongsToMany(MenuItem::class, 'favorites', 'user_id', 'menu_item_id');
+    }
 }
