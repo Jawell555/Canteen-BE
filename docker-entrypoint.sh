@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 
-# Set listening port from Render's dynamic PORT variable
-export SERVER_NAME=":${PORT:-80}"
+# Set listening port from Render's dynamic PORT variable (fallback to 8080 for unprivileged execution)
+export SERVER_NAME=":${PORT:-8080}"
 
 # Run optimizations if in production or staging
 if [ "$APP_ENV" = "production" ] || [ "$APP_ENV" = "staging" ]; then

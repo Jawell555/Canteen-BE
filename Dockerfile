@@ -19,10 +19,13 @@ RUN composer install --no-dev --no-interaction --no-scripts --prefer-dist --opti
 # Copy application source code
 COPY . .
 
-# Ensure storage directories exist and have proper permissions
+# Ensure storage directories exist, have proper permissions, and remove file capabilities
+# (Required on Render to prevent "frankenphp: Operation not permitted")
 RUN mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views bootstrap/cache \
     && chmod -R 775 storage bootstrap/cache \
-    && chmod +x docker-entrypoint.sh
+    && chmod +x docker-entrypoint.sh \
+    && apk add --no-cache libcap \
+    && setcap -r /usr/local/bin/frankenphp
 
 # Default environment settings
 ENV APP_ENV=production
