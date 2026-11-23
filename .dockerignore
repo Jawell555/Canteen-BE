@@ -1,0 +1,10 @@
+/vendor
+/node_modules
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.editorconfig
+phpunit.xml
+tests/
