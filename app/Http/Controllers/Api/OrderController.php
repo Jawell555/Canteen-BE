@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
+use App\Models\CartItem;
 use App\Models\MenuItem;
 use App\Models\Order;
 use App\Models\OrderItem;
@@ -65,7 +66,9 @@ class OrderController extends Controller
                 $proofImageUrl = Storage::url($path);
             }
 
-            $order = DB::transaction(function () use ($validated, $refNumber, $proofImageUrl, $request) {
+            $authenticatedUser = $request->user('sanctum');
+
+            $order = DB::transaction(function () use ($validated, $refNumber, $proofImageUrl, $request, $authenticatedUser) {
                 // 1. Calculate totals
                 $subtotal = 0.00;
                 $normalizedItems = [];
@@ -97,9 +100,9 @@ class OrderController extends Controller
                 $order = Order::create([
                     'daily_queue_number' => $queueInfo['number'],
                     'order_date' => now()->toDateString(),
-                    'user_id' => $request->user()?->id,
+                    'user_id' => $authenticatedUser?->id,
                     'customer_name' => $validated['customer_name'],
-                    'customer_phone' => $validated['customer_phone'] ?? null,
+                    'customer_phone' => $validated['customer_phone'] ?? $authenticatedUser?->phone_number,
                     'guest_token' => $request->header('X-Guest-Token'),
                     'status' => 'pending',
                     'subtotal' => $subtotal,
@@ -131,6 +134,11 @@ class OrderController extends Controller
 
                 // 6. Reserve stock with 10-minute hold
                 $expiresAt = $this->stockHoldService->reserveStock($order, $normalizedItems, 10);
+
+                // 7. Clear persisted cart for authenticated customer
+                if ($authenticatedUser) {
+                    CartItem::where('user_id', $authenticatedUser->id)->delete();
+                }
 
                 return [$order, $expiresAt];
             });

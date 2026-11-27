@@ -47,15 +47,23 @@ class CustomerProfileController extends Controller
                 'payment' => $order->paymentRecord,
                 'has_feedback' => $order->feedback !== null,
                 'items' => $order->orderItems->map(function ($oi) {
+                    $menuItem = $oi->menuItem;
+                    $currentStock = $menuItem ? (int) $menuItem->current_stock : 0;
+                    $isSoldOut = $menuItem ? (bool) $menuItem->is_sold_out : true;
+
                     return [
                         'id' => $oi->menu_item_id,
-                        'name' => $oi->item_name ?: $oi->menuItem?->name ?: 'Item',
+                        'menu_item_id' => $oi->menu_item_id,
+                        'name' => $oi->item_name ?: $menuItem?->name ?: 'Item',
                         'price' => (float) $oi->unit_price,
                         'unit_price' => (float) $oi->unit_price,
                         'quantity' => (int) $oi->quantity,
                         'subtotal' => (float) $oi->subtotal,
                         'custom_notes' => $oi->custom_notes ?: '',
-                        'image_url' => $oi->menuItem?->image_url,
+                        'image_url' => $menuItem?->image_url,
+                        'current_stock' => $currentStock,
+                        'is_sold_out' => $isSoldOut,
+                        'is_available' => $menuItem !== null && ! $isSoldOut && $currentStock > 0,
                     ];
                 })->values(),
                 'order_items' => $order->orderItems,

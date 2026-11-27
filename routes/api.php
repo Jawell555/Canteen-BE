@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\AdminMenuController;
 use App\Http\Controllers\Api\AdminReportController;
 use App\Http\Controllers\Api\AdminStaffController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\CartController;
 use App\Http\Controllers\Api\CustomerProfileController;
 use App\Http\Controllers\Api\FeedbackController;
 use App\Http\Controllers\Api\MenuController;
@@ -65,11 +66,18 @@ Route::prefix('v1')->group(function () {
     Route::post('/feedback', [FeedbackController::class, 'store']);
     Route::get('/feedback/summary', [FeedbackController::class, 'summary']);
 
-    // Customer Profile & Favorites (Phase 6 - T036)
+    // Customer Profile, Favorites & Persistent Cart
     Route::prefix('customer')->middleware('auth:sanctum')->group(function () {
         Route::get('/orders', [CustomerProfileController::class, 'orders']);
         Route::get('/favorites', [CustomerProfileController::class, 'favorites']);
         Route::post('/favorites/toggle', [CustomerProfileController::class, 'toggleFavorite']);
         Route::post('/favorites', [CustomerProfileController::class, 'toggleFavorite']);
+
+        Route::get('/cart', [CartController::class, 'index']);
+        Route::post('/cart/items', [CartController::class, 'store']);
+        Route::post('/cart/merge', [CartController::class, 'merge']);
+        Route::patch('/cart/items/{id}', [CartController::class, 'update']);
+        Route::delete('/cart/items/{id}', [CartController::class, 'destroy']);
+        Route::delete('/cart', [CartController::class, 'clear']);
     });
 });

@@ -119,4 +119,12 @@ class User extends Authenticatable
     {
         return $this->belongsToMany(MenuItem::class, 'favorites', 'user_id', 'menu_item_id');
     }
+
+    /**
+     * Relationship with CartItems.
+     */
+    public function cartItems()
+    {
+        return $this->hasMany(CartItem::class);
+    }
 }

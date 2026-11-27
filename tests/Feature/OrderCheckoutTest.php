@@ -4,7 +4,10 @@ namespace Tests\Feature;
 
 use App\Models\Category;
 use App\Models\MenuItem;
+use App\Models\User;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 class OrderCheckoutTest extends TestCase
@@ -124,5 +127,56 @@ class OrderCheckoutTest extends TestCase
             'items' => [['menu_item_id' => $menuItem->id, 'quantity' => 1]],
         ]);
         $res2->assertStatus(201)->assertJsonPath('data.formatted_queue_number', '#002');
+    }
+
+    public function test_authenticated_customer_checkout_links_order_and_appears_in_history(): void
+    {
+        if (! Schema::hasTable('feedback')) {
+            Schema::create('feedback', function (Blueprint $table) {
+                $table->id();
+                $table->foreignId('order_id')->unique()->constrained('orders')->cascadeOnDelete();
+                $table->foreignId('user_id')->nullable()->constrained('users')->nullOnDelete();
+                $table->smallInteger('rating');
+                $table->text('comments')->nullable();
+                $table->timestamp('created_at')->useCurrent();
+            });
+        }
+
+        $customer = User::create([
+            'name' => 'Maria Clara',
+            'email' => 'maria@campus.edu.ph',
+            'phone_number' => '09171112233',
+            'password' => bcrypt('password123'),
+            'role' => 'customer',
+            'is_active' => true,
+        ]);
+
+        $token = $customer->createToken('auth_token')->plainTextToken;
+        $menuItem = MenuItem::first();
+
+        $checkoutRes = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/v1/orders/checkout', [
+                'customer_name' => $customer->name,
+                'payment_method' => 'counter_cash',
+                'items' => [
+                    [
+                        'menu_item_id' => $menuItem->id,
+                        'quantity' => 2,
+                        'custom_notes' => 'Less rice',
+                    ],
+                ],
+            ]);
+
+        $checkoutRes->assertStatus(201)
+            ->assertJsonPath('data.order.user_id', $customer->id);
+
+        $historyRes = $this->withHeader('Authorization', "Bearer {$token}")
+            ->getJson('/api/v1/customer/orders');
+
+        $historyRes->assertStatus(200)
+            ->assertJsonCount(1, 'data.orders')
+            ->assertJsonPath('data.orders.0.items.0.menu_item_id', $menuItem->id)
+            ->assertJsonPath('data.orders.0.items.0.current_stock', 8)
+            ->assertJsonPath('data.orders.0.items.0.is_available', true);
     }
 }
