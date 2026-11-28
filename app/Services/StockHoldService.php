@@ -7,12 +7,13 @@ use App\Models\Order;
 use App\Models\StockHold;
 use Carbon\Carbon;
 use Exception;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class StockHoldService
 {
     /**
-     * Reserve stock for an order atomically using pessimistic locking.
+     * Reserve stock for an order atomically using sorted pessimistic batch locking.
      *
      * @param  array<int, array{menu_item_id: int, quantity: int}>  $items
      *
@@ -21,39 +22,59 @@ class StockHoldService
     public function reserveStock(Order $order, array $items, int $holdMinutes = 10): Carbon
     {
         $expiresAt = now()->addMinutes($holdMinutes);
+        $now = now();
 
-        DB::transaction(function () use ($order, $items, $expiresAt) {
-            foreach ($items as $item) {
-                $itemId = $item['menu_item_id'];
-                $quantity = (int) $item['quantity'];
+        // Aggregate required quantities per menu_item_id and sort IDs to prevent lock deadlocks
+        $qtyByMenuId = [];
+        foreach ($items as $item) {
+            $itemId = (int) $item['menu_item_id'];
+            $qtyByMenuId[$itemId] = ($qtyByMenuId[$itemId] ?? 0) + (int) $item['quantity'];
+        }
+        ksort($qtyByMenuId);
 
-                // Pessimistic lock
-                $menuItem = MenuItem::where('id', $itemId)->lockForUpdate()->first();
+        DB::transaction(function () use ($order, $items, $qtyByMenuId, $expiresAt, $now) {
+            $menuItems = MenuItem::whereIn('id', array_keys($qtyByMenuId))
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get()
+                ->keyBy('id');
+
+            foreach ($qtyByMenuId as $itemId => $totalNeeded) {
+                $menuItem = $menuItems->get($itemId);
 
                 if (! $menuItem) {
                     throw new Exception("Menu item #{$itemId} not found.");
                 }
 
-                if ($menuItem->is_sold_out || $menuItem->current_stock < $quantity) {
+                if ($menuItem->is_sold_out || $menuItem->current_stock < $totalNeeded) {
                     throw new Exception("Insufficient stock for '{$menuItem->name}'. Only {$menuItem->current_stock} remaining.");
                 }
 
-                // Decrement stock
-                $menuItem->current_stock -= $quantity;
+                $menuItem->current_stock -= $totalNeeded;
                 if ($menuItem->current_stock <= 0) {
                     $menuItem->is_sold_out = true;
                 }
                 $menuItem->save();
+            }
 
-                // Create stock hold
-                StockHold::create([
+            $holdRows = [];
+            foreach ($items as $item) {
+                $holdRows[] = [
                     'order_id' => $order->id,
-                    'menu_item_id' => $menuItem->id,
-                    'quantity' => $quantity,
+                    'menu_item_id' => (int) $item['menu_item_id'],
+                    'quantity' => (int) $item['quantity'],
                     'expires_at' => $expiresAt,
                     'status' => 'active',
-                ]);
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
             }
+
+            if ($holdRows !== []) {
+                StockHold::insert($holdRows);
+            }
+
+            DB::afterCommit(fn () => CanteenCache::forgetMenu());
         });
 
         return $expiresAt;
@@ -66,11 +87,11 @@ class StockHoldService
     {
         StockHold::where('order_id', $order->id)
             ->where('status', 'active')
-            ->update(['status' => 'committed']);
+            ->update(['status' => 'committed', 'updated_at' => now()]);
     }
 
     /**
-     * Release holds and return inventory for a given order.
+     * Release holds and return inventory for a given order atomically.
      */
     public function releaseOrderHolds(Order $order): void
     {
@@ -80,57 +101,95 @@ class StockHoldService
                 ->lockForUpdate()
                 ->get();
 
-            foreach ($holds as $hold) {
-                $menuItem = MenuItem::where('id', $hold->menu_item_id)->lockForUpdate()->first();
-                if ($menuItem) {
-                    $menuItem->current_stock += $hold->quantity;
-                    if ($menuItem->current_stock > 0 && $menuItem->is_sold_out) {
-                        $menuItem->is_sold_out = false;
-                    }
-                    $menuItem->save();
-                }
-
-                $hold->status = 'released';
-                $hold->save();
+            if ($holds->isEmpty()) {
+                return;
             }
+
+            $this->restoreInventoryAndReleaseHolds($holds);
+            DB::afterCommit(fn () => CanteenCache::forgetMenu());
         });
     }
 
     /**
-     * Release all expired holds across the system and restore current_stock.
+     * Release all expired holds across the system and restore current_stock in bulk.
      */
     public function releaseExpiredHolds(): int
     {
         $releasedCount = 0;
 
         DB::transaction(function () use (&$releasedCount) {
-            $expiredHolds = StockHold::where('status', 'active')
+            $expiredHolds = StockHold::with('order:id,status')
+                ->where('status', 'active')
                 ->where('expires_at', '<=', now())
                 ->lockForUpdate()
                 ->get();
 
-            foreach ($expiredHolds as $hold) {
-                $menuItem = MenuItem::where('id', $hold->menu_item_id)->lockForUpdate()->first();
-                if ($menuItem) {
-                    $menuItem->current_stock += $hold->quantity;
-                    if ($menuItem->current_stock > 0 && $menuItem->is_sold_out) {
-                        $menuItem->is_sold_out = false;
-                    }
-                    $menuItem->save();
-                }
-
-                $hold->status = 'released';
-                $hold->save();
-                $releasedCount++;
-
-                // If the associated order is still pending, cancel it
-                if ($hold->order && $hold->order->status === 'pending') {
-                    $hold->order->status = 'cancelled';
-                    $hold->order->save();
-                }
+            if ($expiredHolds->isEmpty()) {
+                return;
             }
+
+            $releasedCount = $expiredHolds->count();
+            $this->restoreInventoryAndReleaseHolds($expiredHolds);
+
+            $pendingOrderIds = $expiredHolds
+                ->pluck('order')
+                ->filter(fn ($order) => $order !== null && $order->status === 'pending')
+                ->pluck('id')
+                ->unique()
+                ->values()
+                ->all();
+
+            if ($pendingOrderIds !== []) {
+                Order::whereIn('id', $pendingOrderIds)
+                    ->where('status', 'pending')
+                    ->update(['status' => 'cancelled', 'updated_at' => now()]);
+            }
+
+            DB::afterCommit(fn () => CanteenCache::forgetMenu());
         });
 
         return $releasedCount;
+    }
+
+    /**
+     * Batch-lock menu items in sorted order, restore stock, and mark holds released.
+     *
+     * @param  Collection<int, StockHold>  $holds
+     */
+    protected function restoreInventoryAndReleaseHolds($holds): void
+    {
+        $restoreByMenuId = [];
+        $holdIds = [];
+
+        foreach ($holds as $hold) {
+            $holdIds[] = $hold->id;
+            $menuId = (int) $hold->menu_item_id;
+            $restoreByMenuId[$menuId] = ($restoreByMenuId[$menuId] ?? 0) + (int) $hold->quantity;
+        }
+        ksort($restoreByMenuId);
+
+        $menuItems = MenuItem::whereIn('id', array_keys($restoreByMenuId))
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
+
+        foreach ($restoreByMenuId as $menuId => $qtyToRestore) {
+            $menuItem = $menuItems->get($menuId);
+            if (! $menuItem) {
+                continue;
+            }
+
+            $menuItem->current_stock += $qtyToRestore;
+            if ($menuItem->current_stock > 0 && $menuItem->is_sold_out) {
+                $menuItem->is_sold_out = false;
+            }
+            $menuItem->save();
+        }
+
+        StockHold::whereIn('id', $holdIds)->update([
+            'status' => 'released',
+            'updated_at' => now(),
+        ]);
     }
 }

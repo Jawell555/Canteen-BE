@@ -10,6 +10,9 @@ use App\Models\PaymentRecord;
 use App\Models\StockHold;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class StaffAndAdminTest extends TestCase
@@ -383,5 +386,111 @@ class StaffAndAdminTest extends TestCase
 
         $logsResponse->assertStatus(200)
             ->assertJsonPath('success', true);
+    }
+
+    public function test_admin_can_toggle_menu_active_upload_photo_and_track_ordered_count(): void
+    {
+        Storage::fake('public');
+
+        $order = Order::create([
+            'daily_queue_number' => 9,
+            'order_date' => now()->toDateString(),
+            'customer_name' => 'Order Counter Test',
+            'status' => 'preparing',
+            'subtotal' => 255.00,
+            'total_amount' => 255.00,
+        ]);
+
+        OrderItem::create([
+            'order_id' => $order->id,
+            'menu_item_id' => $this->menuItem->id,
+            'item_name' => $this->menuItem->name,
+            'quantity' => 3,
+            'unit_price' => 85.00,
+            'subtotal' => 255.00,
+        ]);
+
+        // Admin index reflects today's ordered_count
+        $this->actingAs($this->adminUser)
+            ->getJson('/api/v1/admin/menu')
+            ->assertStatus(200)
+            ->assertJsonPath('data.items.0.ordered_count', 3)
+            ->assertJsonPath('data.items.0.is_active', true);
+
+        // Admin deactivates meal for today's menu -> hidden from public catalog
+        $this->actingAs($this->adminUser)
+            ->patchJson("/api/v1/admin/menu/{$this->menuItem->id}/toggle-active")
+            ->assertStatus(200)
+            ->assertJsonPath('data.is_active', false);
+
+        $this->getJson('/api/v1/menu/items')
+            ->assertStatus(200)
+            ->assertJsonCount(0, 'data.items');
+
+        // Admin reactivates meal
+        $this->actingAs($this->adminUser)
+            ->patchJson("/api/v1/admin/menu/{$this->menuItem->id}/toggle-active")
+            ->assertStatus(200)
+            ->assertJsonPath('data.is_active', true);
+
+        $this->getJson('/api/v1/menu/items')
+            ->assertStatus(200)
+            ->assertJsonCount(1, 'data.items');
+
+        // Sold out items are hidden from customer catalog and Today's Menu
+        $this->actingAs($this->staffUser)
+            ->patchJson("/api/v1/staff/menu/{$this->menuItem->id}/toggle-sold-out", [
+                'is_sold_out' => true,
+            ])
+            ->assertStatus(200);
+
+        $this->getJson('/api/v1/menu/items')
+            ->assertStatus(200)
+            ->assertJsonCount(0, 'data.items');
+
+        // Marking available restores item to customer catalog
+        $this->actingAs($this->staffUser)
+            ->patchJson("/api/v1/staff/menu/{$this->menuItem->id}/toggle-sold-out", [
+                'is_sold_out' => false,
+            ])
+            ->assertStatus(200);
+
+        $this->getJson('/api/v1/menu/items')
+            ->assertStatus(200)
+            ->assertJsonCount(1, 'data.items');
+
+        // Admin creates item with photo upload and quantity field
+        $file = UploadedFile::fake()->create('caldereta.jpg', 120, 'image/jpeg');
+        $uploadRes = $this->actingAs($this->adminUser)
+            ->post('/api/v1/admin/menu', [
+                'name' => 'Beef Caldereta',
+                'category' => 'Meals',
+                'price' => 115,
+                'quantity' => 25,
+                'image' => $file,
+            ], ['Accept' => 'application/json']);
+
+        $uploadRes->assertStatus(201)
+            ->assertJsonPath('data.current_stock', 25)
+            ->assertJsonPath('data.quantity', 25);
+
+        $imageUrl = $uploadRes->json('data.image_url');
+        $this->assertStringContainsString('/api/v1/media/menu/', $imageUrl);
+        Storage::disk('public')->assertExists('menu/'.basename($imageUrl));
+
+        // Active items persist across calendar days unless manually deactivated by admin
+        Carbon::setTestNow(now()->addDay());
+        try {
+            $nextDayRes = $this->actingAs($this->adminUser)->getJson('/api/v1/admin/menu');
+            $nextDayRes->assertStatus(200)
+                ->assertJsonPath('data.items.0.is_active', true)
+                ->assertJsonPath('data.items.1.is_active', true);
+
+            $this->getJson('/api/v1/menu/items')
+                ->assertStatus(200)
+                ->assertJsonCount(2, 'data.items');
+        } finally {
+            Carbon::setTestNow();
+        }
     }
 }

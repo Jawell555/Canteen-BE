@@ -18,9 +18,13 @@ class CustomerProfileController extends Controller
     public function orders(Request $request): JsonResponse
     {
         $user = $request->user();
-        $perPage = $request->integer('per_page', 10);
+        $perPage = min(50, max(1, $request->integer('per_page', 10)));
 
-        $paginator = Order::with(['orderItems.menuItem', 'paymentRecord', 'feedback'])
+        $paginator = Order::with([
+            'orderItems.menuItem:id,name,image_url,current_stock,is_sold_out',
+            'paymentRecord:id,order_id,method,status,amount,reference_number',
+            'feedback:id,order_id',
+        ])
             ->where('user_id', $user->id)
             ->latest()
             ->paginate($perPage);
@@ -66,7 +70,6 @@ class CustomerProfileController extends Controller
                         'is_available' => $menuItem !== null && ! $isSoldOut && $currentStock > 0,
                     ];
                 })->values(),
-                'order_items' => $order->orderItems,
             ];
         });
 
@@ -88,7 +91,10 @@ class CustomerProfileController extends Controller
     {
         $user = $request->user();
 
-        $favorites = Favorite::with('menuItem.category')
+        $favorites = Favorite::with([
+            'menuItem:id,category_id,name,description,price,image_url,current_stock,is_sold_out',
+            'menuItem.category:id,name,slug',
+        ])
             ->where('user_id', $user->id)
             ->latest('id')
             ->get()
@@ -98,31 +104,7 @@ class CustomerProfileController extends Controller
                     return null;
                 }
 
-                $emoji = $item->image_url;
-                if (! $emoji || $emoji === '🍽️') {
-                    $name = strtolower($item->name);
-                    if (str_contains($name, 'adobo')) {
-                        $emoji = '🍛';
-                    } elseif (str_contains($name, 'sinigang')) {
-                        $emoji = '🍲';
-                    } elseif (str_contains($name, 'inasal')) {
-                        $emoji = '🍗';
-                    } elseif (str_contains($name, 'tapsilog')) {
-                        $emoji = '🍳';
-                    } elseif (str_contains($name, 'shanghai') || str_contains($name, 'lumpia')) {
-                        $emoji = '🥢';
-                    } elseif (str_contains($name, 'turon')) {
-                        $emoji = '🍌';
-                    } elseif (str_contains($name, 'ham') || str_contains($name, 'cheese')) {
-                        $emoji = '🥪';
-                    } elseif (str_contains($name, 'calamansi') || str_contains($name, 'juice')) {
-                        $emoji = '🧃';
-                    } elseif (str_contains($name, 'gulaman') || str_contains($name, 'sago')) {
-                        $emoji = '🥤';
-                    } else {
-                        $emoji = '🍽️';
-                    }
-                }
+                $emoji = MenuItem::resolveEmoji($item->name, $item->image_url);
 
                 return [
                     'id' => $item->id,

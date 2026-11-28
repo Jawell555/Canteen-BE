@@ -12,8 +12,22 @@ use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\StaffMenuController;
 use App\Http\Controllers\Api\StaffOrderController;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Storage;
 
 Route::prefix('v1')->group(function () {
+    // Public media serving for uploaded menu photos
+    Route::get('/media/menu/{filename}', function (string $filename) {
+        $safeName = basename($filename);
+        $path = Storage::disk('public')->path('menu/'.$safeName);
+        if (! is_file($path)) {
+            abort(404);
+        }
+
+        return response()->file($path, [
+            'Cache-Control' => 'public, max-age=31536000',
+        ]);
+    })->where('filename', '[A-Za-z0-9._-]+');
+
     // Authentication Routes
     Route::prefix('auth')->group(function () {
         Route::post('/register', [AuthController::class, 'register']);
@@ -50,8 +64,10 @@ Route::prefix('v1')->group(function () {
     Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin'])->group(function () {
         Route::get('/menu', [AdminMenuController::class, 'index']);
         Route::post('/menu', [AdminMenuController::class, 'store']);
+        Route::post('/menu/{id}', [AdminMenuController::class, 'update']);
         Route::put('/menu/{id}', [AdminMenuController::class, 'update']);
         Route::patch('/menu/{id}', [AdminMenuController::class, 'update']);
+        Route::patch('/menu/{id}/toggle-active', [AdminMenuController::class, 'toggleActive']);
         Route::delete('/menu/{id}', [AdminMenuController::class, 'destroy']);
 
         Route::get('/staff', [AdminStaffController::class, 'index']);

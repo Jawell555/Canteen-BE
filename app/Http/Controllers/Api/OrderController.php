@@ -25,7 +25,7 @@ class OrderController extends Controller
     ) {}
 
     /**
-     * Checkout an order with 10-minute atomic stock reservation.
+     * Checkout an order with 10-minute atomic stock reservation and batch inserts.
      */
     public function checkout(Request $request): JsonResponse
     {
@@ -68,21 +68,35 @@ class OrderController extends Controller
 
             $authenticatedUser = $request->user('sanctum');
 
-            $order = DB::transaction(function () use ($validated, $refNumber, $proofImageUrl, $request, $authenticatedUser) {
-                // 1. Calculate totals
+            $orderResult = DB::transaction(function () use ($validated, $refNumber, $proofImageUrl, $request, $authenticatedUser) {
+                $menuIds = collect($validated['items'])
+                    ->map(fn ($i) => (int) ($i['menu_item_id'] ?? $i['id']))
+                    ->unique()
+                    ->sort()
+                    ->values()
+                    ->all();
+
+                $menuItemsMap = MenuItem::whereIn('id', $menuIds)
+                    ->orderBy('id')
+                    ->get(['id', 'name', 'price'])
+                    ->keyBy('id');
+
                 $subtotal = 0.00;
                 $normalizedItems = [];
 
                 foreach ($validated['items'] as $itemData) {
-                    $menuItemId = $itemData['menu_item_id'] ?? $itemData['id'];
-                    $menuItem = MenuItem::findOrFail($menuItemId);
+                    $menuItemId = (int) ($itemData['menu_item_id'] ?? $itemData['id']);
+                    $menuItem = $menuItemsMap->get($menuItemId);
+                    if (! $menuItem) {
+                        throw new Exception("Menu item #{$menuItemId} not found.");
+                    }
+
                     $quantity = (int) $itemData['quantity'];
-                    $itemSubtotal = $menuItem->price * $quantity;
+                    $itemSubtotal = round((float) $menuItem->price * $quantity, 2);
                     $subtotal += $itemSubtotal;
 
                     $normalizedItems[] = [
                         'menu_item_id' => $menuItemId,
-                        'menu_item' => $menuItem,
                         'item_name' => $menuItem->name,
                         'quantity' => $quantity,
                         'unit_price' => $menuItem->price,
@@ -91,12 +105,9 @@ class OrderController extends Controller
                     ];
                 }
 
-                $totalAmount = $subtotal;
-
-                // 2. Generate daily sequential queue number
+                $totalAmount = round($subtotal, 2);
                 $queueInfo = $this->queueNumberService->getNextQueueNumber();
 
-                // 3. Create Order
                 $order = Order::create([
                     'daily_queue_number' => $queueInfo['number'],
                     'order_date' => now()->toDateString(),
@@ -105,13 +116,14 @@ class OrderController extends Controller
                     'customer_phone' => $validated['customer_phone'] ?? $authenticatedUser?->phone_number,
                     'guest_token' => $request->header('X-Guest-Token'),
                     'status' => 'pending',
-                    'subtotal' => $subtotal,
+                    'subtotal' => $totalAmount,
                     'total_amount' => $totalAmount,
                 ]);
 
-                // 4. Create OrderItems
+                $now = now();
+                $orderItemRows = [];
                 foreach ($normalizedItems as $item) {
-                    OrderItem::create([
+                    $orderItemRows[] = [
                         'order_id' => $order->id,
                         'menu_item_id' => $item['menu_item_id'],
                         'item_name' => $item['item_name'],
@@ -119,10 +131,12 @@ class OrderController extends Controller
                         'unit_price' => $item['unit_price'],
                         'custom_notes' => $item['custom_notes'],
                         'subtotal' => $item['subtotal'],
-                    ]);
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ];
                 }
+                OrderItem::insert($orderItemRows);
 
-                // 5. Create PaymentRecord
                 PaymentRecord::create([
                     'order_id' => $order->id,
                     'method' => $validated['payment_method'],
@@ -132,10 +146,8 @@ class OrderController extends Controller
                     'proof_image_url' => $proofImageUrl,
                 ]);
 
-                // 6. Reserve stock with 10-minute hold
                 $expiresAt = $this->stockHoldService->reserveStock($order, $normalizedItems, 10);
 
-                // 7. Clear persisted cart for authenticated customer
                 if ($authenticatedUser) {
                     CartItem::where('user_id', $authenticatedUser->id)->delete();
                 }
@@ -143,8 +155,8 @@ class OrderController extends Controller
                 return [$order, $expiresAt];
             });
 
-            [$createdOrder, $expiresAt] = $order;
-            $createdOrder->load(['orderItems.menuItem', 'paymentRecord']);
+            [$createdOrder, $expiresAt] = $orderResult;
+            $createdOrder->load(['orderItems.menuItem:id,name,image_url', 'paymentRecord']);
 
             return ApiResponse::success([
                 'order' => $createdOrder,
@@ -160,20 +172,25 @@ class OrderController extends Controller
     }
 
     /**
-     * Show order details by UUID or ID.
+     * Show order details by UUID or numeric ID using index-friendly lookup.
      */
     public function show(string $id): JsonResponse
     {
-        $order = Order::with(['orderItems.menuItem', 'paymentRecord'])
-            ->where('uuid', $id)
-            ->orWhere('id', is_numeric($id) ? (int) $id : 0)
-            ->first();
+        $query = Order::with([
+            'orderItems.menuItem:id,name,image_url',
+            'paymentRecord',
+            'stockHolds' => fn ($q) => $q->where('status', 'active'),
+        ]);
+
+        $order = is_numeric($id)
+            ? $query->where('id', (int) $id)->first()
+            : $query->where('uuid', $id)->first();
 
         if (! $order) {
             return ApiResponse::error('Order not found', 404);
         }
 
-        $hold = $order->stockHolds()->where('status', 'active')->first();
+        $hold = $order->stockHolds->first();
         $secondsRemaining = $hold ? max(0, now()->diffInSeconds($hold->expires_at, false)) : 0;
 
         return ApiResponse::success([

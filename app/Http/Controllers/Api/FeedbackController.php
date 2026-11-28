@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Responses\ApiResponse;
 use App\Models\Feedback;
 use App\Models\Order;
+use App\Services\CanteenCache;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -76,10 +77,8 @@ class FeedbackController extends Controller
      */
     public function summary(Request $request): JsonResponse
     {
-        $totalReviews = Feedback::count();
-        $averageRating = $totalReviews > 0 ? round((float) Feedback::avg('rating'), 2) : 0.0;
-
-        $perPage = $request->integer('per_page', 10);
+        $stats = CanteenCache::getFeedbackStats();
+        $perPage = min(50, max(1, $request->integer('per_page', 10)));
 
         $paginator = Feedback::with(['user:id,name', 'order:id,uuid'])
             ->latest('id')
@@ -99,16 +98,10 @@ class FeedbackController extends Controller
         });
 
         return ApiResponse::success([
-            'average_rating' => $averageRating,
-            'total_reviews' => $totalReviews,
-            'total_feedback' => $totalReviews,
-            'rating_breakdown' => [
-                '5' => Feedback::where('rating', 5)->count(),
-                '4' => Feedback::where('rating', 4)->count(),
-                '3' => Feedback::where('rating', 3)->count(),
-                '2' => Feedback::where('rating', 2)->count(),
-                '1' => Feedback::where('rating', 1)->count(),
-            ],
+            'average_rating' => $stats['average_rating'],
+            'total_reviews' => $stats['total_reviews'],
+            'total_feedback' => $stats['total_reviews'],
+            'rating_breakdown' => $stats['rating_breakdown'],
             'comments' => $formattedComments,
             'feedbacks' => $formattedComments,
             'pagination' => [

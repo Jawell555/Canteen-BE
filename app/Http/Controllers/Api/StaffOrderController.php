@@ -21,15 +21,25 @@ class StaffOrderController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Order::with(['orderItems.menuItem', 'paymentRecord', 'stockHolds'])->latest();
+        $query = Order::with([
+            'orderItems.menuItem:id,name',
+            'paymentRecord:id,order_id,method,status,amount,reference_number,proof_image_url',
+            'stockHolds' => fn ($q) => $q->where('status', 'active'),
+        ])->latest();
 
-        if ($request->has('status') && ! empty($request->query('status'))) {
-            $statuses = explode(',', $request->query('status'));
+        if ($request->filled('status')) {
+            $statuses = explode(',', (string) $request->query('status'));
             $query->whereIn('status', $statuses);
+        } else {
+            // Keep polling fast at scale: always include all active queue orders plus recent finished orders
+            $query->where(function ($q) {
+                $q->whereIn('status', ['pending', 'preparing', 'ready'])
+                    ->orWhere('order_date', '>=', now()->subDays(2)->toDateString());
+            })->limit(150);
         }
 
         $orders = $query->get()->map(function ($order) {
-            $activeHold = $order->stockHolds->where('status', 'active')->first();
+            $activeHold = $order->stockHolds->first();
             $holdSeconds = $activeHold ? max(0, now()->diffInSeconds($activeHold->expires_at, false)) : 0;
 
             $items = $order->orderItems->map(function ($oi) {
@@ -87,7 +97,7 @@ class StaffOrderController extends Controller
             'status' => 'required|string|in:pending,preparing,ready,completed,cancelled',
         ]);
 
-        $order = Order::where('uuid', $id)->orWhere('id', is_numeric($id) ? (int) $id : 0)->firstOrFail();
+        $order = $this->resolveOrderOrFail($id);
         $order->status = $validated['status'];
 
         if ($validated['status'] === 'completed') {
@@ -109,7 +119,7 @@ class StaffOrderController extends Controller
             'reason' => 'nullable|string|max:500',
         ]);
 
-        $order = Order::with(['paymentRecord', 'stockHolds'])->where('uuid', $id)->orWhere('id', is_numeric($id) ? (int) $id : 0)->firstOrFail();
+        $order = $this->resolveOrderOrFail($id, ['paymentRecord', 'stockHolds']);
 
         if ($validated['action'] === 'verify') {
             if ($order->paymentRecord) {
@@ -124,35 +134,33 @@ class StaffOrderController extends Controller
                 $order->save();
             }
 
-            // Commit stock holds permanently
             $this->stockHoldService->commitHolds($order);
 
             return ApiResponse::success($order, 'Payment verified and stock holds committed');
-        } else {
-            // Reject payment & release stock
-            if ($order->paymentRecord) {
-                $order->paymentRecord->status = 'rejected';
-                $order->paymentRecord->rejection_reason = $validated['reason'] ?? 'Payment rejected by staff';
-                $order->paymentRecord->save();
-            }
-
-            $order->status = 'cancelled';
-            $order->cancellation_reason = $validated['reason'] ?? 'Payment rejected';
-            $order->save();
-
-            $this->stockHoldService->releaseOrderHolds($order);
-
-            AuditLog::create([
-                'user_id' => $request->user()?->id,
-                'action' => 'reject_payment',
-                'entity_type' => 'orders',
-                'entity_id' => (string) $order->id,
-                'details' => ['reason' => $validated['reason'] ?? 'Payment rejected'],
-                'ip_address' => $request->ip(),
-            ]);
-
-            return ApiResponse::success($order, 'Payment rejected and stock holds released');
         }
+
+        if ($order->paymentRecord) {
+            $order->paymentRecord->status = 'rejected';
+            $order->paymentRecord->rejection_reason = $validated['reason'] ?? 'Payment rejected by staff';
+            $order->paymentRecord->save();
+        }
+
+        $order->status = 'cancelled';
+        $order->cancellation_reason = $validated['reason'] ?? 'Payment rejected';
+        $order->save();
+
+        $this->stockHoldService->releaseOrderHolds($order);
+
+        AuditLog::create([
+            'user_id' => $request->user()?->id,
+            'action' => 'reject_payment',
+            'entity_type' => 'orders',
+            'entity_id' => (string) $order->id,
+            'details' => ['reason' => $validated['reason'] ?? 'Payment rejected'],
+            'ip_address' => $request->ip(),
+        ]);
+
+        return ApiResponse::success($order, 'Payment rejected and stock holds released');
     }
 
     /**
@@ -164,7 +172,7 @@ class StaffOrderController extends Controller
             'reason' => 'required|string|max:500',
         ]);
 
-        $order = Order::where('uuid', $id)->orWhere('id', is_numeric($id) ? (int) $id : 0)->firstOrFail();
+        $order = $this->resolveOrderOrFail($id);
 
         $order->status = 'cancelled';
         $order->cancellation_reason = $validated['reason'];
@@ -182,5 +190,19 @@ class StaffOrderController extends Controller
         ]);
 
         return ApiResponse::success($order, 'Order cancelled and inventory restored');
+    }
+
+    /**
+     * Index-friendly order resolution by numeric ID or UUID.
+     *
+     * @param  array<int, string>  $with
+     */
+    protected function resolveOrderOrFail(string $id, array $with = []): Order
+    {
+        $query = $with !== [] ? Order::with($with) : Order::query();
+
+        return is_numeric($id)
+            ? $query->where('id', (int) $id)->firstOrFail()
+            : $query->where('uuid', $id)->firstOrFail();
     }
 }

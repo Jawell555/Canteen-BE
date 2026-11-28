@@ -197,4 +197,45 @@ class CustomerCartTest extends TestCase
             ->assertJsonPath('data.item_count', 0)
             ->assertJsonCount(0, 'data.items');
     }
+
+    public function test_cart_enforces_aggregate_stock_across_notes_and_allows_bulk_quantities(): void
+    {
+        // Aggregate stock check across note variants (stock = 5)
+        $this->actingAs($this->customer, 'sanctum')
+            ->postJson('/api/v1/customer/cart/items', [
+                'menu_item_id' => $this->adobo->id,
+                'quantity' => 3,
+                'custom_notes' => 'Less rice',
+            ])
+            ->assertStatus(200);
+
+        $this->actingAs($this->customer, 'sanctum')
+            ->postJson('/api/v1/customer/cart/items', [
+                'menu_item_id' => $this->adobo->id,
+                'quantity' => 3,
+                'custom_notes' => 'Extra sauce',
+            ])
+            ->assertStatus(422);
+
+        // Bulk order > 50 units when stock permits
+        $this->adobo->update(['daily_stock_limit' => 100, 'current_stock' => 100]);
+
+        $bulkAdd = $this->actingAs($this->customer, 'sanctum')
+            ->postJson('/api/v1/customer/cart/items', [
+                'menu_item_id' => $this->adobo->id,
+                'quantity' => 60,
+                'custom_notes' => 'Party tray',
+            ]);
+
+        $bulkAdd->assertStatus(200)
+            ->assertJsonPath('data.item_count', 63);
+
+        $bulkItem = collect($bulkAdd->json('data.items'))->firstWhere('custom_notes', 'Party tray');
+        $this->actingAs($this->customer, 'sanctum')
+            ->patchJson("/api/v1/customer/cart/items/{$bulkItem['id']}", [
+                'quantity' => 59,
+            ])
+            ->assertStatus(200)
+            ->assertJsonPath('data.item_count', 62);
+    }
 }

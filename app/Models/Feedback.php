@@ -2,12 +2,19 @@
 
 namespace App\Models;
 
+use App\Services\CanteenCache;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 class Feedback extends Model
 {
     use HasFactory;
+
+    protected static function booted(): void
+    {
+        static::saved(fn () => CanteenCache::forgetFeedback());
+        static::deleted(fn () => CanteenCache::forgetFeedback());
+    }
 
     protected $table = 'feedback';
 

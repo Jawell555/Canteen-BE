@@ -2,12 +2,19 @@
 
 namespace App\Models;
 
+use App\Services\CanteenCache;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 class Category extends Model
 {
     use HasFactory;
+
+    protected static function booted(): void
+    {
+        static::saved(fn () => CanteenCache::forgetMenu());
+        static::deleted(fn () => CanteenCache::forgetMenu());
+    }
 
     protected $fillable = [
         'name',
